@@ -4,12 +4,18 @@
   SATURNITY RESTORE
   "I love you to the moon and to Saturn"
 
-  Reverts all changes made by optimize.lua
-  Reads disabled.list to know exactly what we touched.
+  Reverts changes made by optimize.lua.
+  Reads disabled.list to know exactly what was touched.
+  Reads missing.list to skip packages that don't exist on this device.
+
+  v1.0.2 changes:
+   - Removed Phase 4 (kernel revert) — never applied in v1.0.2 optimize
+   - Missing.list aware (won't try to re-enable ghosts)
+   - Compact output mode for narrow terminals
 ==============================================================================
 ]]
 
-local VERSION = "1.0.1"
+local VERSION = "1.0.2"
 
 -- ============================================================
 -- AUTO-UPDATE CONFIG
@@ -33,6 +39,7 @@ local LOG_DIR        = SATURNITY_DIR.."/logs"
 local LOG_FILE       = LOG_DIR.."/restore.log"
 local FAIL_LOG       = LOG_DIR.."/restore_failures.log"
 local DISABLED_LIST  = SATURNITY_DIR.."/disabled.list"
+local MISSING_LIST   = SATURNITY_DIR.."/missing.list"
 local PROP_BACKUP    = SATURNITY_DIR.."/local.prop.backup"
 
 -- ============================================================
@@ -63,7 +70,6 @@ local SETTINGS_RESET = {
     {ns="global", key="ota_disable_automatic_update", val="0"},
 }
 
--- Persist props we set (revert)
 local PROPS_RESET = {
     {key="persist.logd.size",                 val="256K"},
     {key="persist.traced.enable",             val="1"},
@@ -73,7 +79,6 @@ local PROPS_RESET = {
     {key="persist.sys.lmk.use_minfree_levels",val="false"},
 }
 
--- 8 clones (to clear standby/appops back to default)
 local ROBLOX_CLONES = {
     "com.roblox.client",
     "com.roblox.clienr",
@@ -122,7 +127,6 @@ local function append_file(p, d)
 end
 
 local function trim(s) return (s:gsub("^%s+", ""):gsub("%s+$", "")) end
-
 local function timestamp() return os.date("%Y-%m-%d %H:%M:%S") end
 
 local function shell(cmd)
@@ -142,12 +146,40 @@ local function sush(cmd)
 end
 
 -- ============================================================
+-- TERMINAL WIDTH + COMPACT MODE
+-- ============================================================
+
+local TERM_COLS = 80
+local COMPACT   = false
+
+local function detect_terminal()
+    local out = shell("stty size 2>/dev/null || tput cols 2>/dev/null || echo 80")
+    local _, cols = out:match("^(%d+)%s+(%d+)$")
+    if cols then
+        TERM_COLS = tonumber(cols)
+    else
+        local n = tonumber(out:match("(%d+)"))
+        if n then TERM_COLS = n end
+    end
+    COMPACT = TERM_COLS < 60
+end
+
+local function display_pkg(pkg)
+    if not COMPACT then return pkg end
+    local s = pkg
+    s = s:gsub("^com%.google%.android%.", "g/")
+    s = s:gsub("^com%.android%.", "")
+    return s
+end
+
+-- ============================================================
 -- LOGGING
 -- ============================================================
 
 local stats = { ok = 0, warn = 0, fail = 0, skip = 0 }
 
-local function log(level, msg)
+local function log(level, msg, msg_full)
+    msg_full = msg_full or msg
     local color = C.gray
     if     level == "OK"    then color = C.green;  stats.ok   = stats.ok   + 1
     elseif level == "WARN"  then color = C.yellow; stats.warn = stats.warn + 1
@@ -158,9 +190,9 @@ local function log(level, msg)
     elseif level == "FATAL" then color = C.red..C.bold
     end
     print(string.format("%s[%s]%s %s", color, level, C.reset, msg))
-    append_file(LOG_FILE, string.format("[%s] [%-5s] %s\n", timestamp(), level, msg))
+    append_file(LOG_FILE, string.format("[%s] [%-5s] %s\n", timestamp(), level, msg_full))
     if level == "FAIL" or level == "FATAL" then
-        append_file(FAIL_LOG, string.format("[%s] [%s] %s\n", timestamp(), level, msg))
+        append_file(FAIL_LOG, string.format("[%s] [%s] %s\n", timestamp(), level, msg_full))
     end
 end
 
@@ -176,7 +208,12 @@ end
 -- ============================================================
 
 local function banner()
-    print(C.saturn..[[
+    if COMPACT then
+        print(C.saturn..C.bold.."  🪐 SATURNITY RESTORE  v"..VERSION..C.reset)
+        print(C.purple.."  reverting tweaks..."..C.reset)
+        print(C.gray..string.rep("─", math.min(TERM_COLS, 40))..C.reset)
+    else
+        print(C.saturn..[[
    _____       _                  _ _
   / ____|     | |                (_) |
  | (___   __ _| |_ _   _ _ __ _ __ _| |_ _   _
@@ -185,16 +222,17 @@ local function banner()
  |_____/ \__,_|\__|\__,_|_|  |_| |_|_|\__|\__, |
                                            __/ |
               RESTORE                     |___/   v]]..VERSION..C.reset)
-    print(C.purple.."  Reverting Saturnity optimizations..."..C.reset)
-    print(C.gray..string.rep("─", 56)..C.reset)
+        print(C.purple.."  Reverting Saturnity optimizations..."..C.reset)
+        print(C.gray..string.rep("─", 56)..C.reset)
+    end
 end
 
 local function confirm(yes_flag)
     if yes_flag then
-        log("INFO", "--yes flag detected, skipping confirmation")
+        log("INFO", "--yes flag — skipping confirmation")
         return true
     end
-    io.write(C.yellow.."⚠  This will undo all Saturnity tweaks. Continue? [y/N]: "..C.reset)
+    io.write(C.yellow.."⚠  Undo all Saturnity tweaks? [y/N]: "..C.reset)
     io.flush()
     local ans = io.read("*l") or ""
     ans = trim(ans):lower()
@@ -214,10 +252,10 @@ local function check_update()
     end
     local remote = trim(out)
     if remote == VERSION then
-        log("OK", "Already on latest version (v"..VERSION..")")
+        log("OK", "Already on latest (v"..VERSION..")")
         return
     end
-    log("INFO", "New restore.lua version: v"..remote)
+    log("INFO", "New restore.lua: v"..remote)
     local self_path = arg[0]
     if not self_path or self_path == "" then
         log("WARN", "Cannot self-update — continuing")
@@ -257,6 +295,18 @@ local function setup_dirs()
     append_file(LOG_FILE, "\n========== "..timestamp().." | restore.lua v"..VERSION.." ==========\n")
 end
 
+-- Read missing.list so we don't try to re-enable ghosts
+local missing_known = {}
+local function load_missing_list()
+    if not file_exists(MISSING_LIST) then return end
+    for line in io.lines(MISSING_LIST) do
+        local pkg = trim(line)
+        if pkg ~= "" and not pkg:match("^#") then
+            missing_known[pkg] = true
+        end
+    end
+end
+
 -- ============================================================
 -- PHASE 1 — RE-ENABLE PACKAGES
 -- ============================================================
@@ -264,31 +314,33 @@ end
 local function phase_reenable()
     log("PHASE", "Phase 1: Re-enable disabled packages")
     if not file_exists(DISABLED_LIST) then
-        log("WARN", "disabled.list not found — nothing recorded to restore")
+        log("WARN", "disabled.list not found — nothing to restore")
         return
     end
-    local count = 0
-    local kept = {}
+    local count, kept = 0, {}
     for line in io.lines(DISABLED_LIST) do
         local pkg = trim(line)
         if pkg ~= "" then
             count = count + 1
-            local cmd = "pm enable "..pkg
-            local _, err, code = sush(cmd)
-            if code == 0 then
-                log("OK", "Enabled "..pkg)
+            if missing_known[pkg] then
+                log("SKIP", display_pkg(pkg).." (not on device)", pkg.." (not on device)")
             else
-                log("FAIL", "Could not enable "..pkg)
-                log_cmd_failure(cmd, code, err)
-                table.insert(kept, pkg)
+                local cmd = "pm enable "..pkg
+                local _, err, code = sush(cmd)
+                if code == 0 then
+                    log("OK", "Enabled "..display_pkg(pkg), "Enabled "..pkg)
+                else
+                    log("FAIL", "Could not enable "..display_pkg(pkg), "Could not enable "..pkg)
+                    log_cmd_failure(cmd, code, err)
+                    table.insert(kept, pkg)
+                end
             end
         end
     end
     log("INFO", "Processed "..count.." packages")
-    -- rewrite list with only failures (so re-running restore retries them)
     if #kept > 0 then
         write_file(DISABLED_LIST, table.concat(kept, "\n").."\n")
-        log("WARN", #kept.." packages still in disabled.list (will retry on next restore)")
+        log("WARN", #kept.." kept in disabled.list (retry on next restore)")
     else
         os.remove(DISABLED_LIST)
         log("OK", "Cleared disabled.list")
@@ -329,7 +381,6 @@ local function phase_reset_props()
             log_cmd_failure(cmd, code, err)
         end
     end
-    -- restore /data/local.prop from backup OR clear it
     if file_exists(PROP_BACKUP) then
         local data = read_file(PROP_BACKUP)
         local tmp = TMP_DIR.."/.sat_restore_prop"
@@ -345,7 +396,7 @@ local function phase_reset_props()
     else
         local _, _, code = sush("rm -f /data/local.prop")
         if code == 0 then
-            log("OK", "Removed /data/local.prop (no backup existed)")
+            log("OK", "Removed /data/local.prop (no backup)")
         else
             log("WARN", "Could not remove /data/local.prop")
         end
@@ -353,37 +404,14 @@ local function phase_reset_props()
 end
 
 -- ============================================================
--- PHASE 4 — RESET VOLATILE TWEAKS
--- ============================================================
-
-local function phase_reset_volatile()
-    log("PHASE", "Phase 4: Reset volatile tweaks")
-    -- governor → schedutil (Android 10 default)
-    local cpu_count_out = sush("ls /sys/devices/system/cpu/ | grep -c '^cpu[0-9]'")
-    local cpu_count = tonumber(cpu_count_out) or 0
-    local restored = 0
-    for i = 0, cpu_count - 1 do
-        local path = "/sys/devices/system/cpu/cpu"..i.."/cpufreq/scaling_governor"
-        local _, _, code = sush("[ -w "..path.." ] && echo schedutil > "..path)
-        if code == 0 then restored = restored + 1 end
-    end
-    log("OK", "CPU governor → schedutil on "..restored.."/"..cpu_count.." cores")
-    -- vm defaults
-    sush("echo 0 > /proc/sys/vm/overcommit_memory")
-    sush("echo 60 > /proc/sys/vm/swappiness")
-    sush("echo 100 > /proc/sys/vm/vfs_cache_pressure")
-    log("OK", "VM tweaks reverted to defaults")
-end
-
--- ============================================================
--- PHASE 5 — CLEAR CLONE STANDBY OVERRIDES
+-- PHASE 4 — CLEAR CLONE OVERRIDES
 -- ============================================================
 
 local function phase_reset_clones()
-    log("PHASE", "Phase 5: Clear clone overrides")
+    log("PHASE", "Phase 4: Clear clone overrides")
     for _, pkg in ipairs(ROBLOX_CLONES) do
         sush("appops set "..pkg.." RUN_IN_BACKGROUND default")
-        log("OK", pkg.." background → default")
+        log("OK", display_pkg(pkg).." background → default", pkg.." background → default")
     end
 end
 
@@ -392,15 +420,17 @@ end
 -- ============================================================
 
 local function summary()
+    local line_w = math.min(TERM_COLS, 56)
+    local sep = string.rep("═", line_w)
     print()
-    print(C.saturn..string.rep("═", 56)..C.reset)
+    print(C.saturn..sep..C.reset)
     print(C.bold..C.pink.."  🪐 SATURNITY RESTORE — SUMMARY"..C.reset)
-    print(C.saturn..string.rep("═", 56)..C.reset)
+    print(C.saturn..sep..C.reset)
     print(string.format("  %sSuccess%s : %d", C.green,  C.reset, stats.ok))
     print(string.format("  %sSkipped%s : %d", C.gray,   C.reset, stats.skip))
     print(string.format("  %sWarning%s : %d", C.yellow, C.reset, stats.warn))
     print(string.format("  %sFailed %s : %d", C.red,    C.reset, stats.fail))
-    print(C.saturn..string.rep("═", 56)..C.reset)
+    print(C.saturn..sep..C.reset)
     print(C.gray.."  Logs : "..LOG_FILE..C.reset)
     if stats.fail > 0 then
         print(C.red.."  Failures: "..FAIL_LOG..C.reset)
@@ -420,6 +450,7 @@ local function main()
         if a == "--yes" or a == "-y" then yes_flag = true end
     end
 
+    detect_terminal()
     banner()
     setup_dirs()
 
@@ -430,10 +461,11 @@ local function main()
     end
     if not check_root() then os.exit(1) end
 
+    load_missing_list()
+
     phase_reenable()
     phase_reset_settings()
     phase_reset_props()
-    phase_reset_volatile()
     phase_reset_clones()
 
     summary()
