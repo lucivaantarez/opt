@@ -9,7 +9,7 @@
 ==============================================================================
 ]]
 
-local VERSION = "1.0.0"
+local VERSION = "1.0.1"
 
 -- ============================================================
 -- AUTO-UPDATE CONFIG
@@ -26,6 +26,8 @@ local VERSION_URL = RAW_BASE.."/VERSION-restore"
 -- PATHS
 -- ============================================================
 local HOME           = os.getenv("HOME") or "/data/data/com.termux/files/home"
+local PREFIX         = os.getenv("PREFIX") or "/data/data/com.termux/files/usr"
+local TMP_DIR        = os.getenv("TMPDIR") or (PREFIX.."/tmp")
 local SATURNITY_DIR  = HOME.."/saturnity"
 local LOG_DIR        = SATURNITY_DIR.."/logs"
 local LOG_FILE       = LOG_DIR.."/restore.log"
@@ -124,8 +126,8 @@ local function trim(s) return (s:gsub("^%s+", ""):gsub("%s+$", "")) end
 local function timestamp() return os.date("%Y-%m-%d %H:%M:%S") end
 
 local function shell(cmd)
-    local to = "/data/local/tmp/.sat_o_"..os.time()..math.random(1000,9999)
-    local te = "/data/local/tmp/.sat_e_"..os.time()..math.random(1000,9999)
+    local to = TMP_DIR.."/.sat_o_"..os.time()..math.random(1000,9999)
+    local te = TMP_DIR.."/.sat_e_"..os.time()..math.random(1000,9999)
     local ok = os.execute(cmd.." >"..to.." 2>"..te)
     local out = read_file(to) or ""
     local err = read_file(te) or ""
@@ -250,6 +252,7 @@ end
 local function setup_dirs()
     mkdirp(SATURNITY_DIR)
     mkdirp(LOG_DIR)
+    mkdirp(TMP_DIR)
     write_file(FAIL_LOG, "")
     append_file(LOG_FILE, "\n========== "..timestamp().." | restore.lua v"..VERSION.." ==========\n")
 end
@@ -329,7 +332,7 @@ local function phase_reset_props()
     -- restore /data/local.prop from backup OR clear it
     if file_exists(PROP_BACKUP) then
         local data = read_file(PROP_BACKUP)
-        local tmp = "/data/local/tmp/.sat_restore_prop"
+        local tmp = TMP_DIR.."/.sat_restore_prop"
         write_file(tmp, data)
         local _, err, code = sush("cp "..tmp.." /data/local.prop && chmod 644 /data/local.prop")
         os.remove(tmp)
