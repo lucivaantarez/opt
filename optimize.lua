@@ -13,7 +13,7 @@
 ==============================================================================
 ]]
 
-local VERSION = "1.0.0"
+local VERSION = "1.0.1"
 
 -- ============================================================
 -- AUTO-UPDATE CONFIG
@@ -30,6 +30,8 @@ local VERSION_URL = RAW_BASE.."/VERSION"
 -- PATHS
 -- ============================================================
 local HOME           = os.getenv("HOME") or "/data/data/com.termux/files/home"
+local PREFIX         = os.getenv("PREFIX") or "/data/data/com.termux/files/usr"
+local TMP_DIR        = os.getenv("TMPDIR") or (PREFIX.."/tmp")
 local SATURNITY_DIR  = HOME.."/saturnity"
 local LOG_DIR        = SATURNITY_DIR.."/logs"
 local LOG_FILE       = LOG_DIR.."/optimize.log"
@@ -198,8 +200,8 @@ end
 
 -- Run a shell command, capture stdout, stderr, exit code
 local function shell(cmd)
-    local tmp_out = "/data/local/tmp/.sat_out_"..os.time()..math.random(1000,9999)
-    local tmp_err = "/data/local/tmp/.sat_err_"..os.time()..math.random(1000,9999)
+    local tmp_out = TMP_DIR.."/.sat_out_"..os.time()..math.random(1000,9999)
+    local tmp_err = TMP_DIR.."/.sat_err_"..os.time()..math.random(1000,9999)
     local full = cmd.." >"..tmp_out.." 2>"..tmp_err
     local ok, _, code = os.execute(full)
     local out = read_file(tmp_out) or ""
@@ -328,6 +330,7 @@ end
 local function setup_dirs()
     mkdirp(SATURNITY_DIR)
     mkdirp(LOG_DIR)
+    mkdirp(TMP_DIR)
     -- fresh failure log per run
     write_file(FAIL_LOG, "")
     append_file(LOG_FILE, "\n========== "..timestamp().." | optimize.lua v"..VERSION.." ==========\n")
@@ -507,8 +510,9 @@ local function phase_props()
         content = content.."\n# Pre-existing entries\n"
         for _, l in ipairs(kept) do content = content..l.."\n" end
     end
-    local tmp = "/data/local/tmp/.sat_local.prop"
+    local tmp = TMP_DIR.."/.sat_local.prop"
     write_file(tmp, content)
+    -- root reads it from termux's tmp (root can read termux files)
     local _, err, code = sush("cp "..tmp.." /data/local.prop && chmod 644 /data/local.prop")
     os.remove(tmp)
     if code == 0 then
